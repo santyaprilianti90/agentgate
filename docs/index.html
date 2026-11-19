@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentGate — Proof-of-Agent Badge for Agent ID Holders</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; background: #0b0e14; color: #e6e9ef; }
+  main { max-width: 640px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 28px; margin: 8px 0 4px; }
+  .sub { color: #9aa4b2; margin: 0 0 20px; }
+  .card { background: #131826; border: 1px solid #232a3d; border-radius: 12px; padding: 16px; margin: 14px 0; }
+  .stats { display: flex; gap: 24px; }
+  .stats b { font-size: 22px; display: block; }
+  .stats span { color: #9aa4b2; font-size: 13px; }
+  label { display: block; font-size: 13px; color: #9aa4b2; margin: 10px 0 4px; }
+  input { width: 100%; box-sizing: border-box; padding: 10px; border-radius: 8px; border: 1px solid #2b3448; background: #0b0e14; color: #e6e9ef; font-size: 16px; }
+  button { background: #f0b90b; color: #141414; border: 0; border-radius: 8px; padding: 11px 18px; font-size: 15px; font-weight: 600; cursor: pointer; margin-top: 12px; }
+  button:disabled { background: #3a4358; color: #8b94a5; cursor: not-allowed; }
+  a { color: #f0b90b; }
+  .msg { min-height: 20px; margin-top: 10px; font-size: 14px; }
+  .ok { color: #4ade80; } .err { color: #f87171; } .dim { color: #9aa4b2; }
+  .small { font-size: 13px; color: #9aa4b2; line-height: 1.5; }
+</style>
+</head>
+<body>
+<main>
+  <h1>AgentGate</h1>
+  <p class="sub">A soulbound proof-of-agent badge + reputation registry for
+  <b>Agent ID</b> holders on BNB Chain.</p>
+
+  <div class="card stats">
+    <div><b id="statBadges">–</b><span>badges claimed</span></div>
+    <div><b id="statCheckins">–</b><span>total check-ins</span></div>
+    <div><b id="statPoints">–</b><span>your points</span></div>
+  </div>
+
+  <div class="card">
+    <div id="walletLine" class="dim">Wallet not connected.</div>
+    <button id="connectBtn">Connect wallet</button>
+
+    <label for="labelInput">Your Agent ID name (e.g. <i>novia</i> for novia.ai)</label>
+    <input id="labelInput" placeholder="yourname" autocomplete="off" spellcheck="false">
+    <div id="status" class="msg"></div>
+    <button id="claimBtn" disabled>Claim badge (gas only)</button>
+    <button id="checkinBtn" disabled>Check in (+1 point)</button>
+    <div id="txLine" class="msg"></div>
+  </div>
+
+  <div class="card small">
+    <p><b>How it works.</b> The badge can only be claimed by the owner of an
+    Agent ID NFT and stays bound to that Agent ID. Check in once a day to grow
+    your Agent ID's public reputation. Other dApps can read
+    <code>isVerifiedAgent()</code> and <code>pointsOfAgent()</code> on-chain.</p>
+    <p><b>Safety.</b> Free forever — no mint price, no sale, no promise of
+    returns; you only pay your own BNB gas. The contract has no owner and no
+    admin functions; badges can never be transferred. This page never asks for
+    seed phrases, private keys, or wallet pairing codes.</p>
+    <p>Contract:
+    <a href="https://bscscan.com/address/0x73529eb493b374e201ef81c5a26dd0ade8835138" target="_blank" rel="noopener">0x73529e…35138</a>
+    · Built for the Binance Wallet × BNB Chain Agent ID Hackathon.</p>
+  </div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/ethers@6.13.4/dist/ethers.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/js-sha3@0.8.0/build/sha3.min.js"></script>
+<script>
+const GATE = "0x73529eb493b374e201ef81c5a26dd0ade8835138";
+const AGENT_ID = "0x60b9262456de011f7d15a54cdd8c48baaa8b022f";
+const BSC_RPC = "https://bsc-dataseed.bnbchain.org";
+const GATE_ABI = [
+  "function claimBadge(uint256) returns (uint256)",
+  "function checkIn()",
+  "function badgeByAgentId(uint256) view returns (uint256)",
+  "function badgeOfWallet(address) view returns (uint256)",
+  "function points(uint256) view returns (uint256)",
+  "function pointsOfAgent(uint256) view returns (uint256)",
+  "function lastCheckIn(uint256) view returns (uint256)",
+  "function totalBadges() view returns (uint256)",
+  "function totalCheckIns() view returns (uint256)"
+];
+const ID_ABI = ["function ownerOf(uint256) view returns (address)"];
+
+const $ = id => document.getElementById(id);
+let signer = null, account = null;
+
+const readProvider = new ethers.JsonRpcProvider(BSC_RPC);
+const gateRead = new ethers.Contract(GATE, GATE_ABI, readProvider);
+const idRead = new ethers.Contract(AGENT_ID, ID_ABI, readProvider);
+
+async function refreshStats() {
+  try {
+    const [b, c] = await Promise.all([gateRead.totalBadges(), gateRead.totalCheckIns()]);
+    $("statBadges").textContent = b.toString();
+    $("statCheckins").textContent = c.toString();
+  } catch (e) { /* RPC hiccup; leave dashes */ }
+}
+refreshStats();
+
+function tokenIdOf(label) {
+  return BigInt("0x" + keccak_256(label.trim().toLowerCase()));
+}
+
+async function refreshState() {
+  const label = $("labelInput").value.trim().toLowerCase();
+  $("claimBtn").disabled = true;
+  $("checkinBtn").disabled = true;
+  $("statPoints").textContent = "–";
+  if (!account) { $("status").textContent = ""; return; }
+  if (!label) { $("status").textContent = "Enter your Agent ID name."; return; }
+  const tid = tokenIdOf(label);
+  try {
+    const owner = await idRead.ownerOf(tid);
+    if (owner.toLowerCase() !== account.toLowerCase()) {
+      $("status").innerHTML = '<span class="err">This wallet does not own ' +
+        ethers.escapeHtml(label) + '.ai.</span>';
+      return;
+    }
+    const badgeId = await gateRead.badgeByAgentId(tid);
+    if (badgeId === 0n) {
+      $("status").innerHTML = '<span class="ok">You own ' + ethers.escapeHtml(label) +
+        '.ai and can claim its badge.</span>';
+      $("claimBtn").disabled = false;
+      return;
+    }
+    const pts = await gateRead.points(badgeId);
+    $("statPoints").textContent = pts.toString();
+    const last = Number(await gateRead.lastCheckIn(badgeId));
+    const now = Math.floor(Date.now() / 1000);
+    if (last === 0 || now >= last + 86400) {
+      $("status").innerHTML = '<span class="ok">Badge #' + badgeId.toString() +
+        ' claimed. You can check in now.</span>';
+      $("checkinBtn").disabled = false;
+    } else {
+      const hrs = Math.ceil((last + 86400 - now) / 3600);
+      $("status").innerHTML = '<span class="ok">Badge #' + badgeId.toString() +
+        ' claimed.</span> <span class="dim">Next check-in in ~' + hrs + 'h.</span>';
+    }
+  } catch (e) {
+    $("status").innerHTML = '<span class="err">Could not read chain state. ' +
+      'Check the name and try again.</span>';
+  }
+}
+
+$("connectBtn").onclick = async () => {
+  if (!window.ethereum) {
+    $("walletLine").innerHTML = '<span class="err">No wallet found. Open this page in your wallet browser.</span>';
+    return;
+  }
+  const provider = new ethers.BrowserProvider(window.ethereum);
+  const network = await provider.getNetwork();
+  if (network.chainId !== 56n) {
+    await window.ethereum.request({
+      method: "wallet_switchEthereumChain", params: [{ chainId: "0x38" }]
+    });
+  }
+  signer = await provider.getSigner();
+  account = await signer.getAddress();
+  $("walletLine").textContent = "Connected: " + account;
+  refreshState();
+};
+
+$("labelInput").addEventListener("input", refreshState);
+
+async function sendTx(fn, label) {
+  $("txLine").textContent = label + " — confirm in your wallet…";
+  try {
+    const gate = new ethers.Contract(GATE, GATE_ABI, signer);
+    const tx = await fn(gate);
+    $("txLine").textContent = label + " sent, waiting for confirmation…";
+    await tx.wait();
+    $("txLine").innerHTML = '<span class="ok">' + label + ' confirmed.</span>';
+    refreshStats(); refreshState();
+  } catch (e) {
+    $("txLine").innerHTML = '<span class="err">' + label + ' failed: ' +
+      (e.shortMessage || e.message || e) + '</span>';
+  }
+}
+
+$("claimBtn").onclick = () =>
+  sendTx(g => g.claimBadge(tokenIdOf($("labelInput").value)), "Claim badge");
+$("checkinBtn").onclick = () =>
+  sendTx(g => g.checkIn(), "Check-in");
+</script>
+</body>
+</html>
